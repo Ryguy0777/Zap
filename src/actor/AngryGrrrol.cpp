@@ -70,6 +70,7 @@ bool zap::AngryGrrrol::DrcTouchCB::ccSetTouchNormal(ActorCollisionCheck* cc, con
 Profile* zap::AngryGrrrol::sProfile = zap::getRegistrar()->newProfile<zap::AngryGrrrol>("angrygrrrol")
     .resources<"guruguru">(ProfileInfo::cResType_Course)
     .createInfo(cCreateInfo)
+    .flag(Profile::cFlag_DrawCullCheck)
     .build();
 
 zap::AngryGrrrol::AngryGrrrol(const ActorCreateParam& param)
