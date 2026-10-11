@@ -10,6 +10,7 @@
 #include <red/profile/MapActorMgr.h>
 #include <zap/actor/StringBank.h>
 #include <zap/actor/NybbleBank.h>
+#include <map/LayerID.h>
 
 SEAD_RTTI_OVERRIDE_IMPL(zap::ActorSpawnerEx, Actor)
 
@@ -48,8 +49,8 @@ ActorBase::Result zap::ActorSpawnerEx::create() {
     }
     mSpawnEventID -= 1;  // events are 0-indexed
 
-    // Setting: Multi-use
-    mMultiUse = red::SpriteUtil::getNybble9(this);
+    // Setting: Usage Mode
+    mSpawnerMode = static_cast<SpawnerMode>(red::SpriteUtil::getNybble9(this));
 
     // Setting: ID type
     switch (red::SpriteUtil::getNybble5(this)) {
@@ -81,13 +82,13 @@ bool zap::ActorSpawnerEx::execute() {
         }
     }
     
-    if (!mNybbleBank.isValid()) {
+    if (!mNybbleBank.isValid() && mNybbleScanAttempt < 6) {
         if (!scanNybble()) {
             return true;
         }
     }
     
-    if (mSpawned && !mMultiUse)
+    if (mSpawned && mSpawnerMode == cSpawnerMode_SingleUse)
         return true;
 
     bool event = SwitchFlagMgr::instance()->isActivated(mSpawnEventID);
@@ -96,25 +97,53 @@ bool zap::ActorSpawnerEx::execute() {
         ActorCreateParam child;
         child.profile = red::ProfileEx::get(mSpawnProfileID);
 
-        const ActorCreateInfo& info = child.profile->getActorCreateInfo();
-        child.position = mPos - sead::Vector3f(info.offset_x, info.offset_y, 0.0f); // account for spawn offs
-        
         const Actor* nybbleBank = ActorMgr::instance()->getActorPtr<Actor>(mNybbleBank);
-        if (nybbleBank == nullptr) [[unlikely]] {
-            tk::fatal("ActorSpawnerEx: Nybble Bank was lost!");
+        
+        child.param_0 = mNybbleBank.isValid() ? nybbleBank->getParam0() : 0;
+        child.param_1 = mNybbleBank.isValid() ? nybbleBank->getParam1() : 0;
+        child.param_ex_0.course.switch_flag_0 = mNybbleBank.isValid() ? nybbleBank->getSwitchFlag0() : 0;
+        child.param_ex_0.course.switch_flag_1 = mNybbleBank.isValid() ? nybbleBank->getSwitchFlag1() : 0;
+        child.param_ex_0.course.layer = mNybbleBank.isValid() ? nybbleBank->getLayer() : getLayer();
+        child.param_ex_1.course.movement_id = mNybbleBank.isValid() ? nybbleBank->getParamEx().course.movement_id : 0;
+        child.param_ex_1.course.link_id = mNybbleBank.isValid() ? nybbleBank->getParamEx().course.link_id : 0;
+        child.param_ex_1.course.init_state_flag = mParamEx.course.init_state_flag; // Nybble bank uses the initial state as a bank ID, use the spawner initial state
+
+        const ActorCreateInfo& info = child.profile->getActorCreateInfo();
+        // Handle Z offset for spawning on other layers
+        // Setup copied from ActorCreateMgr::spawnSpriteActor
+        f32 zOffset = 0.0f;
+        if (info.flag & ActorCreateInfo::cFlag_MapObj) {
+            if (child.param_ex_0.course.layer == LayerID::cLayerID_Layer1) {
+                zOffset = 400.0f;
+            } else {
+                zOffset = -3100.0f;
+            }
+        } else {
+            if (child.param_ex_0.course.layer == LayerID::cLayerID_Layer1) {
+                zOffset = 2200.0f;
+            } else {
+                zOffset = -2500.0f;
+            }
         }
+        child.position = mPos + sead::Vector3f(info.offset_x, info.offset_y, zOffset); // account for spawn offs
         
-        child.param_0 = nybbleBank->getParam0();
-        child.param_1 = nybbleBank->getParam1();
-        child.param_ex_0.course.switch_flag_0 = nybbleBank->getSwitchFlag0();
-        child.param_ex_0.course.switch_flag_1 = nybbleBank->getSwitchFlag1();
-        child.param_ex_0.course.layer = nybbleBank->getLayer();
-        child.param_ex_1.course.movement_id = nybbleBank->getParamEx().course.movement_id;
-        child.param_ex_1.course.link_id = nybbleBank->getParamEx().course.link_id;
-        child.param_ex_1.course.init_state_flag = nybbleBank->getParamEx().course.init_state_flag;
-        
-        ActorMgr::instance()->createImmediately(child);
+        mChildActor = ActorMgr::instance()->createImmediately(child)->getActorUniqueID();
         mSpawned = true;
+    }
+
+    if (!event && mPrevFrameEvent) {
+        // If set to linked, delete the spawned actor on event deactivation
+        ActorMgr* actorMgr = ActorMgr::instance();
+        if (mSpawnerMode == cSpawnerMode_Linked && mSpawned) {
+            for (auto it = actorMgr->getActorBegin(); it != actorMgr->getActorEnd(); it++) {
+                if (Actor* actor = sead::DynamicCast<Actor>(*it)) {
+                    if (actor->getActorUniqueID() == mChildActor) {
+                        actor->deleteRequest();
+                        mSpawned = false;
+                    }
+                }
+            }
+        }
     }
     
     mPrevFrameEvent = event;
@@ -124,7 +153,7 @@ bool zap::ActorSpawnerEx::execute() {
 
 bool zap::ActorSpawnerEx::scanString() {
     // Setting: String Bank ID
-    const u8 stringBankID = red::SpriteUtil::getNybble6(this);
+    const u8 stringBankID = red::SpriteUtil::getNybbleRange(this, 7, 8);
     
     mStringScanAttempt++;
     if (mStringScanAttempt > 5) {
@@ -147,26 +176,26 @@ bool zap::ActorSpawnerEx::scanString() {
 }
 
 bool zap::ActorSpawnerEx::scanNybble() {
+    // Setting: Nybble Bank ID
+    const u8 nybbleBankID = red::SpriteUtil::getNybbleRange(this, 10, 11);
+
     if (mNybbleBank.isValid())
         return true;
 
     mNybbleScanAttempt++;
     if (mNybbleScanAttempt > 5) {
-        tk::fatal("ActorSpawnerEx: Failed to find Nybble Bank after 5 attempts...\nDid you place it one tile to the right of this actor?");
-        return false;
+        tk::println("ActorSpawnerEx: Failed to find Nybble Bank with ID %i after 5 attempts, falling back to all zero values...", nybbleBankID);
+        return true;
     }
 
     ActorMgr* actorMgr = ActorMgr::instance();
 
     for (auto it = actorMgr->getActorBegin(); it != actorMgr->getActorEnd(); it++) {
         if (NybbleBank* bank = sead::DynamicCast<NybbleBank>(*it)) {
-            if (bank->getPos().x == mStartPos.x + 16.0f && bank->getPos().y == mStartPos.y) {
+            if (bank->getParamEx().course.init_state_flag == nybbleBankID) {
                 mNybbleBank = bank->getActorUniqueID();
                 tk::println("Found nybble bank");
                 return true;
-            } else {
-                sead::Vector3f delta = bank->getPos() - mStartPos;
-                tk::println("Nybble bank found, but not at the right position. Delta: %f, %f, %f", delta.x, delta.y, delta.z);
             }
         }
     }
